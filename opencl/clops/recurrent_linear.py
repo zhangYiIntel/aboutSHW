@@ -28,7 +28,7 @@ __kernel void recurrent_gated_delta_rule(__global float * q,
     __global float * output) {
     int b = get_global_id(0);
     int h = get_global_id(1);
-    int i_v = get_global_id(2);
+    int i_v = get_group_id(2);
     int BATCH_STRIDE = BATCH_NUM * K_HEAD_NUMS * SEQ_LEN;
     int HEAD_STRIDE = SEQ_LEN * K_HEAD_DIMS;
     float* q_ptr = q + b * BATCH_STRIDE + h * HEAD_STRIDE;
