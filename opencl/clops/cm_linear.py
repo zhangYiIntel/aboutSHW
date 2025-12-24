@@ -142,8 +142,8 @@ def recurrent_gated_delta_rule_ref(
         h = h.clone() * g[:, :, i].exp()[..., None, None]
         h = h.clone()
         b_beta = beta[:, :, i]
-        # print("beta ", beta)
-        print("dot_product hk", h.clone() * b_k[..., None].sum(-2))
+        print("beta ", beta)
+        # print("dot_product hk", h.clone() * b_k[..., None].sum(-2))
         b_v = b_v - (h.clone() * b_k[..., None]).sum(-2)
         # print("bv ", b_v)
         b_v = b_v * b_beta[..., None]
@@ -191,10 +191,10 @@ if __name__ == "__main__":
     # batch_size, max_kv_len = 16, 1024 
     # qkv=[16, 1024, 1152] float16  position_id_base=0
     B = 1
-    H  = 1
-    T = 32
-    K = 64
-    V = 64
+    H  = 2
+    T = 1024 * 32
+    K = 128
+    V = 128
     torch.set_printoptions(sci_mode=False)
     torch.manual_seed(42)
     dtype = torch.float32
@@ -215,18 +215,13 @@ if __name__ == "__main__":
     q = F.normalize(q, p=2, dim=-1)
     k = F.normalize(k, p=2, dim=-1)
     hidden_states = torch.randn(B, H, K, V, dtype=dtype)
-    for h in range(H):
-        for t in range(T):
-            # q[0, t, h, :] = torch.arange(t + h + 1, t + h + 1 + K)
-            # k[0, t, h, :] = torch.arange(t + h + 2, t + h + 2 + K)
-            # v[0, t, h, :] = torch.arange(t + h + 3, t + h + 3 + V)
-            # beta[0, t, h] = 0.25
-            # g[0, t, h] = 0.24
-            kv = torch.ones([K, V])
-            # for i in range(K):
-            #     kv[i, 0:V//2] = 32
-            #     kv[i, V//2:V] = 64
-            hidden_states[0, h, :, :] = kv
+    # hidden_states = torch.zeros(B*H*V*K, dtype=dtype).reshape([B, H, K, V])
+    hidden_states_cm = hidden_states.transpose(2, 3).contiguous()
+    # for h in range(H):
+    #     for t in range(T):
+            # q[1, t, h, :] = torch.arange(t + h + 1, t + h + 1 + K)
+            # k[1, t, h, :] = torch.arange(t + h + 2, t + h + 2 + K)
+            # v[1, t, h, :] = torch.arange(t + h + 3, t + h + 3 + V)
 
 
     print("q ", q)
@@ -239,22 +234,22 @@ if __name__ == "__main__":
     cl_v = to_cl(v)
     cl_g = to_cl(g)
     cl_beta = to_cl(beta)
-    cl_hidden_states = to_cl(hidden_states)
+    cl_hidden_states = to_cl(hidden_states_cm)
     cl_o = to_cl(o)
     recurrnGDN = RecurrentGDN(B, H, T, K, V)
-    n_times = 1
-    # print(n_times)
-    # for i in range(n_times):
-    recurrnGDN(cl_q, cl_k, cl_v, cl_g, cl_beta, cl_hidden_states, cl_o)
-    # durs = cl.finish()
-    # Bsize = (q.numel() + k.numel() + v.numel() + g.numel() + beta.numel() + o.numel()) * 4
-    # for ns in durs:
-    #     print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
-    o_ref, h_ref = recurrent_gated_delta_rule_ref(q, k, v, beta, g, 1.0, hidden_states, output_final_state=True)
-    cm_o = to_torch(cl_o)
-    cm_h = to_torch(cl_hidden_states)
-    print("o ", cm_o.shape)
-    print("o_fef", o_ref.shape)
-    # print("h ", cm_h)
-    # print("h_ref ", h_ref)
-    print(assert_close("00000 ", o_ref, cm_o, 0.002))
+    n_times = 10
+    print(n_times)
+    for i in range(n_times):
+        recurrnGDN(cl_q, cl_k, cl_v, cl_g, cl_beta, cl_hidden_states, cl_o)
+    durs = cl.finish()
+    Bsize = (q.numel() + k.numel() + v.numel() + g.numel() + beta.numel() + o.numel()) * 4
+    for ns in durs:
+        print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
+    # o_ref, h_ref = recurrent_gated_delta_rule_ref(q, k, v, beta, g, 1.0, hidden_states, output_final_state=True)
+    # cm_o = to_torch(cl_o)
+    # cm_h = to_torch(cl_hidden_states)
+    # print("o ", cm_o)
+    # print("o_fef", o_ref)
+    # # print("h ", cm_h)
+    # # print("h_ref ", h_ref)
+    # print(assert_close("00000 ", o_ref, cm_o, 0.002))

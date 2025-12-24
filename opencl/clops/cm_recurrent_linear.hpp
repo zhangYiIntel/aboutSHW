@@ -6,20 +6,15 @@
 //# CM-compiler is C++17
 static_assert(__cplusplus >= 201703L);
 
-extern "C" _GENX_MAIN_ void vadd(SurfaceIndex ibuf0 [[type("buffer_t")]],
-                                 SurfaceIndex ibuf1 [[type("buffer_t")]],
-                                 SurfaceIndex obuf [[type("buffer_t")]]) {
-    unsigned tid = cm_group_id(0) * cm_local_size(0) + cm_local_id(0);
-    printf("tid %d\n", tid);
-    vector<half, 32> in0;
-    read(ibuf0, tid * 32 * sizeof(half), in0);
-
-    vector<half, 32> in1;
-    read(ibuf1, tid * 32 * sizeof(half), in1);
-
-    in0 += in1;
-
-    write(obuf, tid * 32 * sizeof(half), in0);
+//offset in
+template <typename T, int N>
+CM_INLINE void cm_load_by_row(vector_ref<T, N> out, SurfaceIndex base, uint offset) {
+    if constexpr (N == 128) {
+        out.select<N/2, 1>(0) = cm_load<T, 64>(base, offset);
+        out.select<N/2, 1>(N/2) = cm_load<T, 64>(base, offset + N/2 * sizeof(T));
+    } else if constexpr (N <= 64) {
+        out = cm_load<T, N>(base, offset);
+    }
 }
 
 template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims>
@@ -41,12 +36,7 @@ void recurrent_linear_attn(int b_idx,
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
         int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims +
                      v_head_dim_idx * k_head_dims;
-        if constexpr (k_head_dims == 128) {
-            h0.select<64, 1>(k_head_dims * i) = cm_load<float, 64>(initial_state, stride * 4);
-            h0.select<64, 1>(k_head_dims * i + 64) = cm_load<float, 64>(initial_state, stride + 64 * 4);
-        } else if constexpr (k_head_dims <= 64) {
-            h0.select<k_head_dims, 1>(k_head_dims * i) = cm_load<float, k_head_dims>(initial_state, stride * 4);
-        }
+        cm_load_by_row(h0.select<k_head_dims, 1>(k_head_dims * i), initial_state, stride * sizeof(float));
     }
 
     for (int s = 0; s < SEQ_LEN; s++) {
@@ -55,20 +45,23 @@ void recurrent_linear_attn(int b_idx,
         int stride = b_idx * SEQ_LEN * v_num_heads + s * v_num_heads + head_idx;
         auto b_beta = cm_load<float, 1>(beta, stride * 4);
         auto b_g = cm_load<float, 1>(g, stride * 4);
-        if (head_dim_t_idx == 0) {
-            printf("b_idx %d head_idx %d head_dim_t_idx %d beta_cur %f b_g %f\n",
-                   b_idx,
-                   head_idx,
-                   head_dim_t_idx,
-                   b_beta[0],
-                   b_g[0]);
-        }
+        // if (head_dim_t_idx == 0) {
+        //     printf("b_idx %d head_idx %d head_dim_t_idx %d beta_cur %f b_g %f\n",
+        //            b_idx,
+        //            head_idx,
+        //            head_dim_t_idx,
+        //            b_beta[0],
+        //            b_g[0]);
+        // }
         // B, T, HK, K
         int qk_stride =
             b_idx * SEQ_LEN * k_num_heads * k_head_dims + s * k_num_heads * k_head_dims + head_idx * k_head_dims;
-
-        vector<float, k_head_dims> b_q = cm_load<float, k_head_dims>(q, qk_stride * 4);
-        vector<float, k_head_dims> b_k = cm_load<float, k_head_dims>(k, qk_stride * 4);
+        
+        //read q k
+        vector<float, k_head_dims> b_q; // cm_load<float, k_head_dims>(q, qk_stride * 4);
+        cm_load_by_row(b_q, q, qk_stride * sizeof(float));
+        vector<float, k_head_dims> b_k; // cm_load<float, k_head_dims>(k, qk_stride * 4);
+        cm_load_by_row(b_k, k, qk_stride * sizeof(float));
         // read_v
         // B, T, HV, V
         int v_stride = b_idx * SEQ_LEN * v_num_heads * v_head_dims + s * v_num_heads * v_head_dims +
@@ -87,36 +80,36 @@ void recurrent_linear_attn(int b_idx,
         for (int i = 0; i < v_head_dim_per_t; i++) {
             h0.select<k_head_dims, 1>(k_head_dims * i) = h0.select<k_head_dims, 1>(k_head_dims * i) * g_cur;
             h_k[i] = cm_sum<float>(h0.select<k_head_dims, 1>(k_head_dims * i) * b_k);
-            if (head_dim_t_idx == 0) {
-                printf("b_idx %d head_idx %d head_dim_t_idx %d h_k %f g_cur %f\n",
-                       b_idx,
-                       head_idx,
-                       head_dim_t_idx,
-                       h_k[i],
-                       g_cur);
-            }
+            // if (head_dim_t_idx == 0 && b_idx == 1) {
+            //     printf("b_idx %d head_idx %d head_dim_t_idx %d h_k %f g_cur %f\n",
+            //            b_idx,
+            //            head_idx,
+            //            head_dim_t_idx,
+            //            h_k[i],
+            //            g_cur);
+            // }
         }
         vector<float, v_head_dim_per_t> delta_full = (b_v - h_k) * b_beta[0];
-        if (head_dim_t_idx == 0) {
-            printf("b_idx %d head_idx %d head_dim_t_idx %d delta_full %f\n",
-                   b_idx,
-                   head_idx,
-                   head_dim_t_idx,
-                   delta_full[0]);
-        }
+        // if (head_dim_t_idx == 0 && b_idx == 1) {
+        //     printf("b_idx %d head_idx %d head_dim_t_idx %d delta_full %f\n",
+        //            b_idx,
+        //            head_idx,
+        //            head_dim_t_idx,
+        //            delta_full[0]);
+        // }
 
 #pragma unroll
         for (int i = 0; i < v_head_dim_per_t; i++) {
             float detla = delta_full[i];
             h0.select<k_head_dims, 1>(k_head_dims * i) = h0.select<k_head_dims, 1>(k_head_dims * i) + b_k * detla;
             cur_output[i] = cm_sum<float>(h0.select<k_head_dims, 1>(k_head_dims * i) * b_q);
-            if (head_dim_t_idx == 0) {
-                printf("b_idx %d head_idx %d head_dim_t_idx %d h_k %f\n",
-                       b_idx,
-                       head_idx,
-                       head_dim_t_idx,
-                       h0.select<k_head_dims, 1>(k_head_dims * i)[0]);
-            }
+            // if (head_dim_t_idx == 0 && b_idx == 1) {
+            //     printf("b_idx %d head_idx %d head_dim_t_idx %d h_k %f\n",
+            //            b_idx,
+            //            head_idx,
+            //            head_dim_t_idx,
+            //            h0.select<k_head_dims, 1>(k_head_dims * i)[0]);
+            // }
         }
         // B, T, HV, V
         int output_stride = b_idx * SEQ_LEN * v_num_heads * v_head_dims + s * v_num_heads * v_head_dims +
@@ -128,7 +121,12 @@ void recurrent_linear_attn(int b_idx,
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
         int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims +
                      v_head_dim_idx * k_head_dims;
-        cm_store<float, k_head_dims>(initial_state, stride * 4, h0.select<k_head_dims, 1>(k_head_dims * i));
+        if constexpr (k_head_dims == 128) {
+            cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i));
+            cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i + 64));
+        } else if constexpr (k_head_dims <= 64) {
+            cm_store<float, k_head_dims>(initial_state, stride * 4, h0.select<k_head_dims, 1>(k_head_dims * i));
+        }
     }
 }
 
@@ -140,7 +138,7 @@ extern "C" _GENX_MAIN_ void recurrent_gated_delta_rule(SurfaceIndex q [[type("bu
                                                        SurfaceIndex initial_state [[type("buffer_t")]],
                                                        SurfaceIndex output [[type("buffer_t")]]) {
     int b_idx = cm_group_id(0);
-    int head_idx = cm_group_id(0);
+    int head_idx = cm_group_id(1);
     int head_dim_t_idx = cm_local_id(2);
     constexpr int k_num_heads = K_HEAD_NUMS;
     constexpr int v_num_heads = V_HEAD_NUMS;
