@@ -191,7 +191,7 @@ if __name__ == "__main__":
     # batch_size, max_kv_len = 16, 1024 
     # qkv=[16, 1024, 1152] float16  position_id_base=0
     B = 1
-    H  = 2
+    H  = 1
     T = 10
     K = 128
     V = 128
@@ -247,9 +247,10 @@ if __name__ == "__main__":
         print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
     o_ref, h_ref = recurrent_gated_delta_rule_ref(q, k, v, beta, g, 1.0, hidden_states, output_final_state=True)
     cm_o = to_torch(cl_o)
-    cm_h = to_torch(cl_hidden_states)
+    cm_h = to_torch(cl_hidden_states).transpose(-2, -1)
     print("o ", cm_o)
     print("o_fef", o_ref)
-    # print("h ", cm_h)
-    # print("h_ref ", h_ref)
+    print("h ", cm_h)
+    print("h_ref ", h_ref)
     print(assert_close("00000 ", o_ref, cm_o, 0.002))
+    print(assert_close("00000 ", h_ref, cm_h, 0.002))

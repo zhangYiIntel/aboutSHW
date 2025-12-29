@@ -149,7 +149,7 @@ void recurrent_linear_attn(int b_idx,
                      v_head_dim_idx * k_head_dims;
         if constexpr (k_head_dims == 128) {
             cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i));
-            cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i + 64));
+            cm_store<float, 64>(initial_state, stride * 4 + 4 * 64, h0.select<64, 1>(k_head_dims * i + 64));
         } else if constexpr (k_head_dims <= 64) {
             cm_store<float, k_head_dims>(initial_state, stride * 4, h0.select<k_head_dims, 1>(k_head_dims * i));
         }
