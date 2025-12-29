@@ -10,14 +10,25 @@ static_assert(__cplusplus >= 201703L);
 template <typename T, int N>
 CM_INLINE void cm_load_by_row(vector_ref<T, N> out, SurfaceIndex base, uint offset) {
     if constexpr (N == 128) {
-        out.select<N/2, 1>(0) = cm_load<T, 64>(base, offset);
-        out.select<N/2, 1>(N/2) = cm_load<T, 64>(base, offset + N/2 * sizeof(T));
+        out.select<N/2, 1>(0).format<uint>() = cm_load<uint, 64>(base, offset);
+        out.select<N/2, 1>(N/2).format<uint>() = cm_load<uint, 64>(base, offset + N/2 * sizeof(T));
     } else if constexpr (N <= 64) {
-        out = cm_load<T, N>(base, offset);
+        out.format<uint>() = cm_load<T, N>(base, offset);
     }
 }
 
-template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims>
+template <int N>
+CM_INLINE void cm_prefetch_by_row(SurfaceIndex base, uint offset) {
+    if constexpr (N == 128) {
+        cm_prefetch<64, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(base, offset);
+        cm_prefetch<64, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(base, offset);
+    } else if constexpr (N <= 64) {
+        cm_prefetch<N, DataSize::U32, CacheHint::Cached, CacheHint::Cached>(base, offset);
+    }
+}
+
+// TO DO: Support different input data types
+template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims, int PRE_FETCH_DPT=0, int PRE_FETCH_CNT=1>
 void recurrent_linear_attn(int b_idx,
                            int head_idx,
                            int head_dim_t_idx,
@@ -56,7 +67,12 @@ void recurrent_linear_attn(int b_idx,
         // B, T, HK, K
         int qk_stride =
             b_idx * SEQ_LEN * k_num_heads * k_head_dims + s * k_num_heads * k_head_dims + head_idx * k_head_dims;
-        
+        if ((s % PRE_FETCH_CNT == 0) && head_dim_t_idx < PRE_FETCH_CNT) {
+            const int qkv_stride = (b_idx * SEQ_LEN * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * k_num_heads * k_head_dims + head_idx * k_head_dims) * sizeof(float);
+            cm_prefetch_by_row<k_head_dims>(q, qkv_stride);
+            cm_prefetch_by_row<k_head_dims>(k, qkv_stride);
+            cm_prefetch_by_row<k_head_dims>(v, qkv_stride);
+        }
         //read q k
         vector<float, k_head_dims> b_q; // cm_load<float, k_head_dims>(q, qk_stride * 4);
         cm_load_by_row(b_q, q, qk_stride * sizeof(float));
@@ -67,6 +83,16 @@ void recurrent_linear_attn(int b_idx,
         int v_stride = b_idx * SEQ_LEN * v_num_heads * v_head_dims + s * v_num_heads * v_head_dims +
                        head_idx * v_head_dims + head_dim_t_idx * v_head_dim_per_t;
         vector<float, v_head_dim_per_t> b_v = cm_load<float, v_head_dim_per_t>(v, v_stride * 4);
+        if (PRE_FETCH_DPT)
+        {
+            if (s % 8 == 7)
+            {
+
+                cm_fence(CM_LOCAL_BARRIER);
+            }
+        } else {
+            cm_barrier();
+        }
         // if (head_dim_t_idx == 0) {
         //     printf("b_idx %d head_idx %d head_dim_t_idx %d b_q %f b_q %f\n", b_idx, head_idx, head_dim_t_idx, b_q[0],
         //     b_q[1]); printf("b_idx %d head_idx %d head_dim_t_idx %d b_k %f b_k %f\n", b_idx, head_idx,
