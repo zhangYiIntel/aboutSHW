@@ -28,7 +28,7 @@ void recurrent_linear_attn(int b_idx,
                            SurfaceIndex beta [[type("buffer_t")]],
                            SurfaceIndex initial_state [[type("buffer_t")]],
                            SurfaceIndex output [[type("buffer_t")]]) {
-    constexpr int v_head_dim_per_t = 16;  // 16
+    constexpr int v_head_dim_per_t = v_head_dims / 8;  // 16
     vector<float, v_head_dim_per_t * k_head_dims> h0;
 // h0 [B, H, V, K]
 #pragma unroll
