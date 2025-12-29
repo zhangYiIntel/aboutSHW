@@ -28,7 +28,7 @@ CM_INLINE void cm_prefetch_by_row(SurfaceIndex base, uint offset) {
 }
 
 // TO DO: Support different input data types
-template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims, int PRE_FETCH_DPT=0, int PRE_FETCH_CNT=1>
+template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims, bool use_qk_l2norm, int PRE_FETCH_DPT=0, int PRE_FETCH_CNT=1>
 void recurrent_linear_attn(int b_idx,
                            int head_idx,
                            int head_dim_t_idx,
@@ -78,6 +78,13 @@ void recurrent_linear_attn(int b_idx,
         cm_load_by_row(b_q, q, qk_stride * sizeof(float));
         vector<float, k_head_dims> b_k; // cm_load<float, k_head_dims>(k, qk_stride * 4);
         cm_load_by_row(b_k, k, qk_stride * sizeof(float));
+        if constexpr (use_qk_l2norm) {
+            float eps = 0.000001;
+            float q_sum = cm_sum<float>(b_q * b_q);
+            b_q = b_q * cm_rsqrt(q_sum + eps);
+            float k_sum = cm_sum<float>(b_k * b_k);
+            b_k = b_k * cm_rsqrt(k_sum + eps);
+        }
         // read_v
         // B, T, HV, V
         int v_stride = b_idx * SEQ_LEN * v_num_heads * v_head_dims + s * v_num_heads * v_head_dims +
@@ -170,14 +177,14 @@ extern "C" _GENX_MAIN_ void recurrent_gated_delta_rule(SurfaceIndex q [[type("bu
     constexpr int v_num_heads = V_HEAD_NUMS;
     constexpr int k_head_dims = K_HEAD_DIMS;
     constexpr int v_head_dims = V_HEAD_DIMS;
-    recurrent_linear_attn<k_num_heads, v_num_heads, k_head_dims, v_head_dims>(b_idx,
-                                                                              head_idx,
-                                                                              head_dim_t_idx,
-                                                                              q,
-                                                                              k,
-                                                                              v,
-                                                                              g,
-                                                                              beta,
-                                                                              initial_state,
-                                                                              output);
+    recurrent_linear_attn<k_num_heads, v_num_heads, k_head_dims, v_head_dims, true>(b_idx,
+                                                                                    head_idx,
+                                                                                    head_dim_t_idx,
+                                                                                    q,
+                                                                                    k,
+                                                                                    v,
+                                                                                    g,
+                                                                                    beta,
+                                                                                    initial_state,
+                                                                                    output);
 }

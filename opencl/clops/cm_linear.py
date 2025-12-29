@@ -212,8 +212,8 @@ if __name__ == "__main__":
     # beta = torch.zeros(B*H*T, dtype=dtype).reshape([B, H, T])
     # g = torch.zeros(B*H*T, dtype=dtype).reshape([B, H, T])
     # o = torch.zeros(B, H, T, V).to(v)
-    q = F.normalize(q, p=2, dim=-1)
-    k = F.normalize(k, p=2, dim=-1)
+    q_ref = F.normalize(q, p=2, dim=-1)
+    k_ref = F.normalize(k, p=2, dim=-1)
     hidden_states = torch.randn(B, H, K, V, dtype=dtype)
     # hidden_states = torch.zeros(B*H*V*K, dtype=dtype).reshape([B, H, K, V])
     hidden_states_cm = hidden_states.transpose(2, 3).contiguous()
@@ -245,7 +245,7 @@ if __name__ == "__main__":
     Bsize = (q.numel() + k.numel() + v.numel() + g.numel() + beta.numel() + o.numel()) * 4
     for ns in durs:
         print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
-    o_ref, h_ref = recurrent_gated_delta_rule_ref(q, k, v, beta, g, 1.0, hidden_states, output_final_state=True)
+    o_ref, h_ref = recurrent_gated_delta_rule_ref(q_ref, k_ref, v, beta, g, 1.0, hidden_states, output_final_state=True)
     cm_o = to_torch(cl_o)
     cm_h = to_torch(cl_hidden_states).transpose(-2, -1)
     print("o ", cm_o)
