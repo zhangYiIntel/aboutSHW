@@ -7,13 +7,33 @@
 static_assert(__cplusplus >= 201703L);
 
 //offset in
-template <typename T, int N>
-CM_INLINE void cm_load_by_row(vector_ref<T, N> out, SurfaceIndex base, uint offset) {
-    if constexpr (N == 128) {
-        out.select<N/2, 1>(0).format<uint>() = cm_load<uint, 64>(base, offset);
-        out.select<N/2, 1>(N/2).format<uint>() = cm_load<uint, 64>(base, offset + N/2 * sizeof(T));
-    } else if constexpr (N <= 64) {
-        out.format<uint>() = cm_load<T, N>(base, offset);
+
+template <typename SRC_TYPE, int N>
+CM_INLINE void cm_load_by_row(vector_ref<float, N> out, SurfaceIndex base, uint offset) {
+    if constexpr (std::is_same<SRC_TYPE, float>::value) {
+        if constexpr (N == 128) {
+            out.select<N / 2, 1>(0).format<uint>() = cm_load<uint, 64>(base, offset);
+            out.select<N / 2, 1>(N / 2).format<uint>() = cm_load<uint, 64>(base, offset + N / 2 * sizeof(uint));
+        } else if constexpr (N <= 64) {
+            out.format<uint>() = cm_load<uint, N>(base, offset);
+        }
+    } else if constexpr (std::is_same<SRC_TYPE, half>::value) {
+        out = vector<float, N>(cm_load<uint, N / 2>(base, offset).format<half>());
+    }
+}
+
+template <typename DST_TYPE, int N>
+CM_INLINE void cm_store_by_row(SurfaceIndex base, vector_ref<float, N> data, uint offset) {
+    if constexpr (std::is_same<DST_TYPE, float>::value) {
+        if constexpr (N == 128) {
+            cm_store<float, 64>(base, offset, data.select<64, 1>(0));
+            cm_store<float, 64>(base, offset, data.select<64, 1>(N / 2));
+        } else if constexpr (N <= 64) {
+            cm_store<float, N>(base, offset, data.select<N, 1>(N));
+        }
+    } else if constexpr (std::is_same<DST_TYPE, half>::value) {
+        vector<half, N> temp(data);
+        cm_store<uint, N/2>(base, offset, temp.format<uint>());
     }
 }
 
@@ -28,7 +48,7 @@ CM_INLINE void cm_prefetch_by_row(SurfaceIndex base, uint offset) {
 }
 
 // TO DO: Support different input data types
-template <int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims, int PRE_FETCH_DPT=0, int PRE_FETCH_CNT=1>
+template <typename IN_OUT_DTYPE, int k_num_heads, int v_num_heads, int k_head_dims, int v_head_dims, bool use_qk_l2norm, int PRE_FETCH_DPT=0, int PRE_FETCH_CNT=1>
 void recurrent_linear_attn(int b_idx,
                            int head_idx,
                            int head_dim_t_idx,
@@ -47,7 +67,11 @@ void recurrent_linear_attn(int b_idx,
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
         int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims +
                      v_head_dim_idx * k_head_dims;
-        cm_load_by_row(h0.select<k_head_dims, 1>(k_head_dims * i), initial_state, stride * sizeof(float));
+        cm_load_by_row<IN_OUT_DTYPE, k_head_dims>(h0.select<k_head_dims, 1>(k_head_dims * i), initial_state, stride * sizeof(IN_OUT_DTYPE));
+        if (head_dim_t_idx == 0) {
+            vector_ref<float, k_head_dims> temp = h0.select<k_head_dims, 1>(k_head_dims * i);
+            printf("load h %d h %f %f %f\n", head_dim_t_idx, temp[0], temp[1], temp[2]);
+        }
     }
 
     for (int s = 0; s < SEQ_LEN; s++) {
@@ -67,27 +91,39 @@ void recurrent_linear_attn(int b_idx,
         // B, T, HK, K
         int qk_stride =
             b_idx * SEQ_LEN * k_num_heads * k_head_dims + s * k_num_heads * k_head_dims + head_idx * k_head_dims;
-        if ((s % PRE_FETCH_CNT == 0) && head_dim_t_idx < PRE_FETCH_CNT) {
-            const int qkv_stride = (b_idx * SEQ_LEN * k_num_heads * k_head_dims + (s + PRE_FETCH_DPT + head_dim_t_idx) * k_num_heads * k_head_dims + head_idx * k_head_dims) * sizeof(float);
-            cm_prefetch_by_row<k_head_dims>(q, qkv_stride);
-            cm_prefetch_by_row<k_head_dims>(k, qkv_stride);
-            cm_prefetch_by_row<k_head_dims>(v, qkv_stride);
+        if constexpr (PRE_FETCH_DPT > 0) {
+            if ((s % PRE_FETCH_CNT == 0) && head_dim_t_idx < PRE_FETCH_CNT) {
+                const int qkv_stride =
+                    (b_idx * SEQ_LEN * k_num_heads * k_head_dims +
+                     (s + PRE_FETCH_DPT + head_dim_t_idx) * k_num_heads * k_head_dims + head_idx * k_head_dims) *
+                    sizeof(float);
+                cm_prefetch_by_row<k_head_dims>(q, qkv_stride);
+                cm_prefetch_by_row<k_head_dims>(k, qkv_stride);
+                cm_prefetch_by_row<k_head_dims>(v, qkv_stride);
+            }
         }
-        //read q k
-        vector<float, k_head_dims> b_q; // cm_load<float, k_head_dims>(q, qk_stride * 4);
-        cm_load_by_row(b_q, q, qk_stride * sizeof(float));
-        vector<float, k_head_dims> b_k; // cm_load<float, k_head_dims>(k, qk_stride * 4);
-        cm_load_by_row(b_k, k, qk_stride * sizeof(float));
+        // read q k
+        vector<float, k_head_dims> b_q;  // cm_load<float, k_head_dims>(q, qk_stride * 4);
+        cm_load_by_row<float, k_head_dims>(b_q, q, qk_stride * sizeof(float));
+        vector<float, k_head_dims> b_k;  // cm_load<float, k_head_dims>(k, qk_stride * 4);
+        cm_load_by_row<float, k_head_dims>(b_k, k, qk_stride * sizeof(float));
+
+        // normalize q/k
+        if constexpr (use_qk_l2norm) {
+            float eps = 0.000001;
+            float q_sum = cm_sum<float>(b_q * b_q);
+            b_q = b_q * cm_rsqrt(q_sum + eps);
+            float k_sum = cm_sum<float>(b_k * b_k);
+            b_k = b_k * cm_rsqrt(k_sum + eps);
+        }
+
         // read_v
         // B, T, HV, V
         int v_stride = b_idx * SEQ_LEN * v_num_heads * v_head_dims + s * v_num_heads * v_head_dims +
                        head_idx * v_head_dims + head_dim_t_idx * v_head_dim_per_t;
         vector<float, v_head_dim_per_t> b_v = cm_load<float, v_head_dim_per_t>(v, v_stride * 4);
-        if (PRE_FETCH_DPT)
-        {
-            if (s % 8 == 7)
-            {
-
+        if constexpr (PRE_FETCH_DPT > 0) {
+            if (s % 8 == 7) {
                 cm_fence(CM_LOCAL_BARRIER);
             }
         } else {
@@ -147,6 +183,7 @@ void recurrent_linear_attn(int b_idx,
         int v_head_dim_idx = head_dim_t_idx * v_head_dim_per_t + i;
         int stride = b_idx * k_num_heads * v_head_dims * k_head_dims + head_idx * v_head_dims * k_head_dims +
                      v_head_dim_idx * k_head_dims;
+        //cm_store_by_row<IN_OUT_DTYPE, k_head_dims>(initial_state, h0.select<k_head_dims, 1>(k_head_dims * i), stride * sizeof(float));
         if constexpr (k_head_dims == 128) {
             cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i));
             cm_store<float, 64>(initial_state, stride * 4, h0.select<64, 1>(k_head_dims * i + 64));
@@ -170,14 +207,14 @@ extern "C" _GENX_MAIN_ void recurrent_gated_delta_rule(SurfaceIndex q [[type("bu
     constexpr int v_num_heads = V_HEAD_NUMS;
     constexpr int k_head_dims = K_HEAD_DIMS;
     constexpr int v_head_dims = V_HEAD_DIMS;
-    recurrent_linear_attn<k_num_heads, v_num_heads, k_head_dims, v_head_dims>(b_idx,
-                                                                              head_idx,
-                                                                              head_dim_t_idx,
-                                                                              q,
-                                                                              k,
-                                                                              v,
-                                                                              g,
-                                                                              beta,
-                                                                              initial_state,
-                                                                              output);
+    recurrent_linear_attn<float, k_num_heads, v_num_heads, k_head_dims, v_head_dims, true, 2, 4>(b_idx,
+                                                                                                 head_idx,
+                                                                                                 head_dim_t_idx,
+                                                                                                 q,
+                                                                                                 k,
+                                                                                                 v,
+                                                                                                 g,
+                                                                                                 beta,
+                                                                                                 initial_state,
+                                                                                                 output);
 }

@@ -192,9 +192,9 @@ if __name__ == "__main__":
     # qkv=[16, 1024, 1152] float16  position_id_base=0
     B = 1
     H  = 2
-    T = 10
+    T = 1
     K = 128
-    V = 128
+    V = 64
     torch.set_printoptions(sci_mode=False)
     torch.manual_seed(42)
     dtype = torch.float32
@@ -212,16 +212,16 @@ if __name__ == "__main__":
     # beta = torch.zeros(B*H*T, dtype=dtype).reshape([B, H, T])
     # g = torch.zeros(B*H*T, dtype=dtype).reshape([B, H, T])
     # o = torch.zeros(B, H, T, V).to(v)
-    q = F.normalize(q, p=2, dim=-1)
-    k = F.normalize(k, p=2, dim=-1)
-    hidden_states = torch.randn(B, H, K, V, dtype=dtype)
+    q_ref = F.normalize(q, p=2, dim=-1)
+    k_ref = F.normalize(k, p=2, dim=-1)
+    hidden_states = torch.zeros(B, H, K, V, dtype=torch.float32)
     # hidden_states = torch.zeros(B*H*V*K, dtype=dtype).reshape([B, H, K, V])
     hidden_states_cm = hidden_states.transpose(2, 3).contiguous()
-    # for h in range(H):
-    #     for t in range(T):
-            # q[1, t, h, :] = torch.arange(t + h + 1, t + h + 1 + K)
-            # k[1, t, h, :] = torch.arange(t + h + 2, t + h + 2 + K)
-            # v[1, t, h, :] = torch.arange(t + h + 3, t + h + 3 + V)
+    for h in range(H):
+        for t in range(T):
+            q[0, t, h, :] = torch.arange(t + h + 1, t + h + 1 + K)
+            k[0, t, h, :] = torch.arange(t + h + 2, t + h + 2 + K)
+            v[0, t, h, :] = torch.arange(t + h + 3, t + h + 3 + V)
 
 
     print("q ", q)
@@ -245,11 +245,12 @@ if __name__ == "__main__":
     Bsize = (q.numel() + k.numel() + v.numel() + g.numel() + beta.numel() + o.numel()) * 4
     for ns in durs:
         print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
-    o_ref, h_ref = recurrent_gated_delta_rule_ref(q, k, v, beta, g, 1.0, hidden_states, output_final_state=True)
+    o_ref, h_ref = recurrent_gated_delta_rule_ref(q_ref, k_ref, v, beta, g, 1.0, hidden_states, output_final_state=True)
     cm_o = to_torch(cl_o)
     cm_h = to_torch(cl_hidden_states)
-    print("o ", cm_o)
-    print("o_fef", o_ref)
-    # print("h ", cm_h)
-    # print("h_ref ", h_ref)
+    # print("o ", cm_o)
+    # print("o_fef", o_ref)
+    print("h ", cm_h.transpose(3, 2).contiguous())
+    print("h_ref ", h_ref)
     print(assert_close("00000 ", o_ref, cm_o, 0.002))
+    print(assert_close("00000 ", h_ref.to(torch.float32), cm_h.transpose(3, 2).contiguous(), 0.002))
