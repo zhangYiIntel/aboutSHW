@@ -191,8 +191,8 @@ if __name__ == "__main__":
     # batch_size, max_kv_len = 16, 1024 
     # qkv=[16, 1024, 1152] float16  position_id_base=0
     B = 1
-    H  = 1
-    T = 10
+    H  = 16
+    T = 1024
     K = 128
     V = 128
     torch.set_printoptions(sci_mode=False)
