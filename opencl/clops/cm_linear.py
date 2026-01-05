@@ -105,9 +105,9 @@ def assert_close(prefix, ref, tri, ratio, err_atol=1e-6):
     error_rate = get_err_ratio(ref, tri)
     print(abs_atol, err_atol)
     if abs_atol <= err_atol:
-        print("Good result")
         return "Good Result"
     else:
+        print(f"error_rate {error_rate} ratio {ratio}")
         assert error_rate < ratio, msg
 
 def recurrent_gated_delta_rule_ref(
@@ -157,19 +157,21 @@ def recurrent_gated_delta_rule_ref(
     return o, h
 
 class RecurrentGDN:
-    def __init__(self, B, H, T, K, V):
+    def __init__(self, B, H, T, K, V, dtype):
         self.B = B
         self.H = H
         self.T = T
         self.K = K
         self.V = V
+        self.dtype = dtype
         src1 = r'''#include "cm_recurrent_linear.hpp"'''
         print("compiling ...")
         cwd = os.path.dirname(os.path.realpath(__file__))
         print("K size ", K, V)
+        IO_TYPE = 0 if dtype == torch.float16 else 1
         self.kernels = cl.kernels(src1,
                      (f'-cmc -Qxcm_register_file_size=256 -I{cwd} '
-                      f'-DBATCH_NUM={self.B} -DK_HEAD_NUMS={self.H} -DV_HEAD_NUMS={self.H} -DSEQ_LEN={self.T} -DK_HEAD_DIMS={self.K} -DV_HEAD_DIMS={self.V}')
+                      f'-DBATCH_NUM={self.B} -DK_HEAD_NUMS={self.H} -DV_HEAD_NUMS={self.H} -DSEQ_LEN={self.T} -DK_HEAD_DIMS={self.K} -DV_HEAD_DIMS={self.V} -DIO_TYPE={IO_TYPE}')
                      )
         print("finish ...")
     
@@ -185,11 +187,9 @@ class RecurrentGDN:
                             hidden_states,
                             o
                             )
-
-if __name__ == "__main__":
+        
+def run_test(dtype=torch.float32, perf = False):
     cl.profiling(True)
-    # batch_size, max_kv_len = 16, 1024 
-    # qkv=[16, 1024, 1152] float16  position_id_base=0
     B = 1
     H  = 16
     T = 1024
@@ -197,7 +197,6 @@ if __name__ == "__main__":
     V = 128
     torch.set_printoptions(sci_mode=False)
     torch.manual_seed(42)
-    dtype = torch.float32
     q = torch.randn(B*H*T*K, dtype=dtype).reshape([B, T, H, K])
     k = torch.randn(B*H*T*K, dtype=dtype).reshape([B, T, H, K])
     v = torch.randn(B*H*T*V, dtype=dtype).reshape([B, T, H, V])
@@ -224,9 +223,9 @@ if __name__ == "__main__":
             # v[1, t, h, :] = torch.arange(t + h + 3, t + h + 3 + V)
 
 
-    print("q ", q)
-    print("k ", k)
-    print("v ", v)
+    # print("q ", q)
+    # print("k ", k)
+    # print("v ", v)
     # print("hidden_states", hidden_states[:, :, 0, :64])
     # print("hidden_states", hidden_states[:, :, 0, 64:])
     cl_q = to_cl(q)
@@ -236,8 +235,8 @@ if __name__ == "__main__":
     cl_beta = to_cl(beta)
     cl_hidden_states = to_cl(hidden_states_cm)
     cl_o = to_cl(o)
-    recurrnGDN = RecurrentGDN(B, H, T, K, V)
-    n_times = 1
+    recurrnGDN = RecurrentGDN(B, H, T, K, V, dtype)
+    n_times = 10 if perf else 1
     print(n_times)
     for i in range(n_times):
         recurrnGDN(cl_q, cl_k, cl_v, cl_g, cl_beta, cl_hidden_states, cl_o)
@@ -245,12 +244,21 @@ if __name__ == "__main__":
     Bsize = (q.numel() + k.numel() + v.numel() + g.numel() + beta.numel() + o.numel()) * 4
     for ns in durs:
         print(f"{Bsize*1e-6:.3f} MB {ns*1e-6:.3f} ms, BW: { Bsize/ns : .2f} GB/s")
-    o_ref, h_ref = recurrent_gated_delta_rule_ref(q_ref, k_ref, v, beta, g, 1.0, hidden_states, output_final_state=True)
-    cm_o = to_torch(cl_o)
-    cm_h = to_torch(cl_hidden_states).transpose(-2, -1)
-    print("o ", cm_o)
-    print("o_fef", o_ref)
-    print("h ", cm_h)
-    print("h_ref ", h_ref)
-    print(assert_close("00000 ", o_ref, cm_o, 0.002))
-    print(assert_close("00000 ", h_ref, cm_h, 0.002))
+    if not perf:
+        o_ref, h_ref = recurrent_gated_delta_rule_ref(q_ref, k_ref, v, beta, g, 1.0, hidden_states, output_final_state=True)
+        cm_o = to_torch(cl_o)
+        cm_h = to_torch(cl_hidden_states).transpose(-2, -1)
+        abs_err = 1e-6 if cm_h.dtype == torch.float else 1e-2
+        print(f"run infer precision f{dtype}")
+        if dtype == torch.float32:
+            print(f"run infer precision {dtype} output ", assert_close("00000 ", o_ref, cm_o, 0.002, abs_err))
+            print(f"run infer precision {dtype} hidden_states ", assert_close("00000 ", h_ref, cm_h, 0.002, abs_err))
+        else:
+            print(f"run infer precision {dtype} output ", assert_close("00000 ", o_ref, cm_o.to(torch.float32), 0.002, abs_err))
+            print(f"run infer precision {dtype} hidden_states ", assert_close("00000 ", h_ref, cm_h.to(torch.float32), 0.002, abs_err))       
+
+if __name__ == "__main__":
+    
+    run_test(torch.float32, False)
+    run_test(torch.float16, False)
+
